@@ -146,5 +146,5 @@ def write_allowlist_entry(
 
     with open(path, "a", encoding="utf-8") as fh:
         if path.stat().st_size == 0:
-            fh.write("# git-safe-publish allowlist\n# https://github.com/your-org/git-safe-publish\n\n")
+            fh.write("# git-safe-publish allowlist\n# https://github.com/JasonBerto/git-safe-publish\n\n")
         fh.write(entry_yaml)
