@@ -240,3 +240,40 @@ def get_file_content_at(sha: str, filepath: str, repo: Path) -> str:
     """Return the content of a file at a specific commit."""
     r = _run("show", f"{sha}:{filepath}", cwd=repo, check=False)
     return r.stdout if r.returncode == 0 else ""
+
+
+def get_diff_from_base(repo: Path, base: str) -> str:
+    """Return diff of all changes between base and HEAD (for PR-style checks)."""
+    return _out("diff", f"{base}...HEAD", cwd=repo)
+
+
+def get_all_branch_names(repo: Path) -> List[str]:
+    raw = _out("branch", "-a", "--format=%(refname:short)", cwd=repo)
+    return [b.strip() for b in raw.splitlines() if b.strip()]
+
+
+def get_tag_list(repo: Path) -> List[Tuple[str, str]]:
+    """Return list of (tag_name, subject_line) for all tags."""
+    raw = _out(
+        "for-each-ref", "--format=%(refname:short)|%(subject)",
+        "refs/tags", cwd=repo,
+    )
+    result = []
+    for line in raw.splitlines():
+        parts = line.split("|", 1)
+        if len(parts) == 2:
+            result.append((parts[0].strip(), parts[1].strip()))
+    return result
+
+
+def get_stash_list(repo: Path) -> List[str]:
+    raw = _out("stash", "list", cwd=repo)
+    return [l for l in raw.splitlines() if l]
+
+
+def get_stash_diff(stash_ref: str, repo: Path) -> str:
+    return _out("stash", "show", "-p", "--no-color", stash_ref, cwd=repo)
+
+
+def get_commit_date(sha: str, repo: Path) -> str:
+    return _out("log", "-1", "--format=%ci", sha, cwd=repo)

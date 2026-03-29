@@ -1,16 +1,21 @@
 """CLI entry points for git-safe-publish.
 
-Four commands:
+Commands:
   git-safe-check    — scan staged/tracked content, report issues, exit 0/1/2
+  git-safe-commit   — drop-in for `git commit` with pre-commit safety checks
   git-safe-search   — deep-scan full commit history
   git-safe-push     — drop-in for `git push` with pre-push safety checks
   git-safe-publish  — interactive full check + push flow
+  git-safe-hooks    — install/uninstall/status/ci git hooks
+  git-safe-fix      — guided remediation for history findings
+  git-safe-scan     — scan arbitrary files/dirs outside a git repo
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -23,6 +28,7 @@ from git_safe_publish.git import (
     NotAGitRepo,
     find_repo_root,
     get_current_branch,
+    get_diff_from_base,
     get_remote_url,
     get_remotes,
     get_staged_diff,
@@ -34,20 +40,22 @@ from git_safe_publish.models import ScanResult, Severity
 from git_safe_publish.report import (
     confirm,
     console,
+    output_result,
     print_findings,
     print_header,
     print_json,
+    print_patterns_table,
     print_progress,
     print_progress_done,
     print_remediation_detail,
     print_summary,
 )
 from git_safe_publish.scanner.files import scan_staged_files, scan_tracked_files
-from git_safe_publish.scanner.gitignore import scan_gitignore, suggest_gitignore_additions
+from git_safe_publish.scanner.gitignore import scan_gitignore
 from git_safe_publish.scanner.history import scan_history
 from git_safe_publish.scanner.identity import scan_identity
 from git_safe_publish.scanner.remote import scan_remote
-from git_safe_publish.scanner.secrets import scan_diff
+from git_safe_publish.scanner.secrets import scan_diff, scan_file_content
 
 
 # ---------------------------------------------------------------------------
@@ -55,31 +63,20 @@ from git_safe_publish.scanner.secrets import scan_diff
 # ---------------------------------------------------------------------------
 
 def _find_tests_dir() -> Optional[Path]:
-    """Locate the tests/ directory.
-
-    Priority:
-      1. Two levels above this file (works in editable / source installs).
-      2. tests/ at the root of the current git repository.
-    """
-    # src/git_safe_publish/cli.py → ../../tests
     candidate = Path(__file__).parent.parent.parent / "tests"
     if candidate.is_dir():
         return candidate.resolve()
-
     try:
         repo_tests = find_repo_root() / "tests"
         if repo_tests.is_dir():
             return repo_tests.resolve()
     except NotAGitRepo:
         pass
-
     return None
 
 
 def _run_tests(verbose: bool = False) -> int:
-    """Run the test suite via pytest and return its exit code."""
     tests_dir = _find_tests_dir()
-
     if tests_dir is None:
         console.print("[bold red]Error:[/bold red] Could not find a tests/ directory.")
         console.print(
@@ -87,12 +84,9 @@ def _run_tests(verbose: bool = False) -> int:
             "Run from the project root, or install in editable mode.[/dim]"
         )
         return 2
-
     print_header("git-safe-publish — test suite")
     console.print(f"[dim]Running tests from: {tests_dir}[/dim]\n")
-
     cmd = [sys.executable, "-m", "pytest", str(tests_dir), "-v", "-s"]
-
     proc = subprocess.run(cmd)
     if proc.returncode == 0:
         console.print("\n[bold green]✔  All tests passed.[/bold green]")
@@ -114,7 +108,6 @@ def _load(repo: Path):
 
 
 def _exit_code(result: ScanResult, config) -> int:
-    """Return exit code: 0 = clean, 1 = issues found (and blocking), 2 = tool error."""
     if result.is_clean:
         return 0
     threshold = {"P0": Severity.P0, "P1": Severity.P1, "P2": Severity.P2, "P3": Severity.P3}.get(
@@ -125,6 +118,18 @@ def _exit_code(result: ScanResult, config) -> int:
     return 0
 
 
+def _apply_allowlist(result: ScanResult, repo: Path) -> ScanResult:
+    from git_safe_publish.allowlist import load_allowlist
+    allowlist = load_allowlist(repo)
+    if not allowlist.entries:
+        return result
+    filtered = allowlist.filter(result.findings)
+    suppressed = len(result.findings) - len(filtered)
+    if suppressed:
+        console.print(f"[dim]  {suppressed} finding(s) suppressed by allowlist.[/dim]")
+    return ScanResult(filtered)
+
+
 def _run_full_check(
     repo: Path,
     config,
@@ -133,12 +138,16 @@ def _run_full_check(
     target_remote: str = "origin",
     target_branch: Optional[str] = None,
     force: bool = False,
+    base_branch: Optional[str] = None,
+    include_metadata: bool = False,
 ) -> ScanResult:
-    """Run all enabled checks and return a merged ScanResult."""
     result = ScanResult()
 
-    # 1. Secret scan on staged diff
-    diff = get_staged_diff(repo)
+    # 1. Secret scan on staged diff (or base-diff if --base provided)
+    if base_branch:
+        diff = get_diff_from_base(repo, base_branch)
+    else:
+        diff = get_staged_diff(repo)
     if diff:
         result.merge(scan_diff(diff, config))
 
@@ -147,7 +156,7 @@ def _run_full_check(
     if staged_files:
         result.merge(scan_staged_files(staged_files, config))
 
-    if not staged_only:
+    if not staged_only and not base_branch:
         tracked = get_tracked_files(repo)
         result.merge(scan_tracked_files(tracked, config))
 
@@ -163,7 +172,40 @@ def _run_full_check(
     if check_remote_flag and config.check_remote and get_remotes(repo):
         result.merge(scan_remote(repo, config, target_remote, target_branch, force))
 
-    return result
+    # 6. Metadata checks (Phase 4)
+    if include_metadata:
+        from git_safe_publish.scanner.metadata import (
+            scan_branch_names, scan_tag_annotations, scan_submodules,
+            scan_git_hooks, scan_github_actions,
+        )
+        result.merge(scan_branch_names(repo, config))
+        result.merge(scan_tag_annotations(repo, config))
+        result.merge(scan_submodules(repo, config))
+        result.merge(scan_git_hooks(repo, config))
+        result.merge(scan_github_actions(repo, config))
+
+    return _apply_allowlist(result, repo)
+
+
+def _extract_commit_message(git_args: Tuple[str, ...]) -> Optional[str]:
+    args = list(git_args)
+    for flag in ("-m", "--message"):
+        if flag in args:
+            idx = args.index(flag)
+            if idx + 1 < len(args):
+                return args[idx + 1]
+        prefix = flag + ("=" if flag.startswith("--") else "")
+        for arg in args:
+            if arg.startswith(prefix) and len(arg) > len(prefix):
+                return arg[len(prefix):]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# --format option shared definition
+# ---------------------------------------------------------------------------
+
+_FORMAT_CHOICES = click.Choice(["table", "json", "sarif", "markdown"], case_sensitive=False)
 
 
 # ---------------------------------------------------------------------------
@@ -171,31 +213,55 @@ def _run_full_check(
 # ---------------------------------------------------------------------------
 
 @click.command("git-safe-check")
-@click.option("--staged", is_flag=True, default=False, help="Check staged changes only (skip tracked file scan).")
-@click.option("--remote", "target_remote", default="origin", show_default=True, help="Remote to validate against.")
-@click.option("--branch", "target_branch", default=None, help="Branch to validate (default: current branch).")
-@click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
-@click.option("--no-remote", is_flag=True, default=False, help="Skip remote / branch checks.")
+@click.option("--staged", is_flag=True, default=False, help="Check staged changes only.")
+@click.option("--base", "base_branch", default=None, help="Scan only lines changed vs. this branch (e.g. --base main). Ideal for CI PR checks.")
+@click.option("--remote", "target_remote", default="origin", show_default=True)
+@click.option("--branch", "target_branch", default=None)
+@click.option("--format", "output_fmt", type=_FORMAT_CHOICES, default="table", show_default=True)
+@click.option("--json", "output_json", is_flag=True, default=False, hidden=True, help="Shorthand for --format json.")
+@click.option("--output", "output_file", default=None, help="Write report to FILE instead of stdout.")
+@click.option("--no-remote", is_flag=True, default=False)
 @click.option("--remediate", is_flag=True, default=False, help="Show full remediation steps.")
-@click.option("--init-config", is_flag=True, default=False, help="Write a default .git-safe-publish.yml and exit.")
+@click.option("--metadata", is_flag=True, default=False, help="Also scan branch names, tags, submodules, hooks, and GitHub Actions.")
+@click.option("--watch", is_flag=True, default=False, help="Re-run checks every 3 seconds (Ctrl+C to stop).")
+@click.option("--init-config", is_flag=True, default=False, help="Write default .git-safe-publish.yml and exit.")
+@click.option("--list-patterns", is_flag=True, default=False, help="Print all built-in secret patterns and exit.")
+@click.option("--test-pattern", default=None, metavar="REGEX", help="Test a custom regex against --against value.")
+@click.option("--against", default=None, metavar="VALUE", help="Value to test with --test-pattern.")
 @click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
 @click.version_option(__version__, prog_name="git-safe-check")
 def check(
-    staged: bool,
-    target_remote: str,
-    target_branch: Optional[str],
-    output_json: bool,
-    no_remote: bool,
-    remediate: bool,
-    init_config: bool,
-    run_test: bool,
+    staged, base_branch, target_remote, target_branch,
+    output_fmt, output_json, output_file,
+    no_remote, remediate, metadata, watch,
+    init_config, list_patterns, test_pattern, against,
+    run_test,
 ) -> None:
-    """Scan staged and tracked content for secrets and safety issues.
+    """Scan staged/tracked content for secrets and safety issues.
 
     Exits 0 if clean, 1 if issues found, 2 on error.
     """
     if run_test:
         sys.exit(_run_tests())
+
+    if list_patterns:
+        print_patterns_table()
+        sys.exit(0)
+
+    if test_pattern:
+        import re
+        value = against or ""
+        try:
+            m = re.search(test_pattern, value)
+            if m:
+                console.print(f"[green]✔  Pattern matched:[/green] {m.group(0)!r}")
+                sys.exit(0)
+            else:
+                console.print(f"[yellow]✖  No match[/yellow] for pattern against {value!r}")
+                sys.exit(1)
+        except re.error as e:
+            console.print(f"[red]Invalid regex:[/red] {e}")
+            sys.exit(2)
 
     repo = _get_repo()
     config = _load(repo)
@@ -206,25 +272,36 @@ def check(
         console.print(f"[green]✔[/green] Config written to {cfg_path}")
         sys.exit(0)
 
-    if not output_json:
-        print_header("git-safe-check")
+    fmt = "json" if output_json else output_fmt
 
-    result = _run_full_check(
-        repo, config,
-        staged_only=staged,
-        check_remote_flag=not no_remote,
-        target_remote=target_remote,
-        target_branch=target_branch,
-    )
+    def _run_once():
+        result = _run_full_check(
+            repo, config,
+            staged_only=staged,
+            check_remote_flag=not no_remote,
+            target_remote=target_remote,
+            target_branch=target_branch,
+            base_branch=base_branch,
+            include_metadata=metadata,
+        )
+        if fmt == "table":
+            print_header("git-safe-check")
+        output_result(result, fmt=fmt, scope="check", output_path=output_file, show_remediation=remediate)
+        return result
 
-    if output_json:
-        print_json(result)
-    else:
-        print_findings(result)
-        print_summary(result, scope="check")
-        if remediate and not result.is_clean:
-            print_remediation_detail(result)
+    if watch:
+        console.print("[dim]Watch mode — press Ctrl+C to stop[/dim]\n")
+        try:
+            while True:
+                result = _run_once()
+                console.print(f"[dim]Next scan in 3s…[/dim]", end="\r")
+                time.sleep(3)
+                console.print("\n" + "─" * 60)
+        except KeyboardInterrupt:
+            console.print("\n[dim]Watch stopped.[/dim]")
+            sys.exit(0)
 
+    result = _run_once()
     sys.exit(_exit_code(result, config))
 
 
@@ -232,48 +309,20 @@ def check(
 # git-safe-commit
 # ---------------------------------------------------------------------------
 
-def _extract_commit_message(git_args: Tuple[str, ...]) -> Optional[str]:
-    """Extract the -m / --message value from raw git commit args, if present."""
-    args = list(git_args)
-    for flag in ("-m", "--message"):
-        if flag in args:
-            idx = args.index(flag)
-            if idx + 1 < len(args):
-                return args[idx + 1]
-        # Handle -m"value" or --message=value forms
-        prefix = flag + ("=" if flag.startswith("--") else "")
-        for arg in args:
-            if arg.startswith(prefix) and len(arg) > len(prefix):
-                return arg[len(prefix):]
-    return None
-
-
 @click.command(
     "git-safe-commit",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED)
-@click.option("--skip-checks", is_flag=True, default=False, help="Skip safety checks and commit directly.")
-@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
+@click.option("--skip-checks", is_flag=True, default=False)
+@click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-commit")
 @click.pass_context
-def commit(
-    ctx: click.Context,
-    git_args: Tuple[str, ...],
-    skip_checks: bool,
-    run_test: bool,
-) -> None:
+def commit(ctx, git_args, skip_checks, run_test) -> None:
     """Drop-in replacement for `git commit` with pre-commit safety checks.
 
-    Scans staged changes for secrets, sensitive file types, and identity
-    issues before committing. Also scans the commit message (-m) for secrets.
-
+    Scans staged changes, sensitive files, commit message, and identity.
     All arguments are passed directly to `git commit`.
-
-    Examples:
-        git-safe-commit -m "feat: add login page"
-        git-safe-commit --amend --no-edit
-        git-safe-commit -m "wip" --allow-empty
     """
     if run_test:
         sys.exit(_run_tests())
@@ -283,37 +332,31 @@ def commit(
 
     if not skip_checks:
         print_header("git-safe-commit")
-
         result = ScanResult()
 
-        # 1. Scan staged diff for secrets
         diff = get_staged_diff(repo)
         if diff:
             result.merge(scan_diff(diff, config))
 
-        # 2. Scan staged file types
         staged_files = get_staged_files(repo)
         if staged_files:
             result.merge(scan_staged_files(staged_files, config))
 
-        # 3. Scan the commit message for embedded secrets
         message = _extract_commit_message(git_args)
         if message:
             from git_safe_publish.scanner.secrets import scan_commit_message
-            msg_result = scan_commit_message(message, commit_sha="<pending>", config=config)
-            if not msg_result.is_clean:
-                for f in msg_result.findings:
-                    f.description = f"[commit message] {f.description}"
+            msg_result = scan_commit_message(message, "<pending>", config)
+            for f in msg_result.findings:
+                f.description = f"[commit message] {f.description}"
             result.merge(msg_result)
 
-        # 4. Identity check
         if config.check_identity:
             result.merge(scan_identity(repo, config))
 
-        # 5. .gitignore audit (P2 — inform but don't block commits)
         if config.check_gitignore:
             result.merge(scan_gitignore(repo, config))
 
+        result = _apply_allowlist(result, repo)
         print_findings(result)
         print_summary(result, scope="pre-commit check")
 
@@ -326,7 +369,6 @@ def commit(
                 console.print("[yellow]Commit cancelled.[/yellow]")
                 sys.exit(1)
 
-    # Execute the actual git commit
     cmd = ["git", "commit", *git_args]
     console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
     proc = subprocess.run(cmd, cwd=repo)
@@ -338,24 +380,23 @@ def commit(
 # ---------------------------------------------------------------------------
 
 @click.command("git-safe-search")
-@click.option("--branch", default="--all", show_default=True, help='Branch to scan ("--all" for all refs).')
-@click.option("--limit", default=None, type=int, help="Limit scan to the N most recent commits.")
-@click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
-@click.option("--remediate", is_flag=True, default=False, help="Show full remediation steps.")
-@click.option("--quiet", is_flag=True, default=False, help="Suppress progress output.")
-@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
+@click.option("--branch", default="--all", show_default=True)
+@click.option("--limit", default=None, type=int)
+@click.option("--since", default=None, metavar="DATE", help="Only scan commits after this date (e.g. 2024-01-01).")
+@click.option("--author", default=None, metavar="PATTERN", help="Only scan commits by matching author email.")
+@click.option("--format", "output_fmt", type=_FORMAT_CHOICES, default="table", show_default=True)
+@click.option("--json", "output_json", is_flag=True, default=False, hidden=True)
+@click.option("--output", "output_file", default=None, help="Write report to FILE.")
+@click.option("--remediate", is_flag=True, default=False)
+@click.option("--exposure", is_flag=True, default=False, help="Show exposure window (first/last seen date per finding).")
+@click.option("--metadata", is_flag=True, default=False, help="Also scan branch names, tags, stash, submodules, hooks.")
+@click.option("--quiet", is_flag=True, default=False)
+@click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-search")
-def search(
-    branch: str,
-    limit: Optional[int],
-    output_json: bool,
-    remediate: bool,
-    quiet: bool,
-    run_test: bool,
-) -> None:
+def search(branch, limit, since, author, output_fmt, output_json, output_file,
+           remediate, exposure, metadata, quiet, run_test) -> None:
     """Deep-scan full commit history for secrets and sensitive data.
 
-    Scans every commit's diff and message for secret patterns.
     Exits 0 if clean, 1 if issues found, 2 on error.
     """
     if run_test:
@@ -368,32 +409,71 @@ def search(
         console.print("[yellow]No commits yet — nothing to scan.[/yellow]")
         sys.exit(0)
 
-    if not output_json:
-        print_header("git-safe-search")
-        scope = f"branch: {branch}" + (f", limit: {limit}" if limit else "")
-        console.print(f"[dim]Scanning history ({scope})…[/dim]\n")
+    fmt = "json" if output_json else output_fmt
 
-    def _progress(current: int, total: int, sha: str) -> None:
-        if not quiet and not output_json:
+    if fmt == "table":
+        print_header("git-safe-search")
+        scope_parts = [f"branch: {branch}"]
+        if limit:
+            scope_parts.append(f"limit: {limit}")
+        if since:
+            scope_parts.append(f"since: {since}")
+        if author:
+            scope_parts.append(f"author: {author}")
+        console.print(f"[dim]Scanning history ({', '.join(scope_parts)})…[/dim]\n")
+
+    def _progress(current, total, sha):
+        if not quiet and fmt == "table":
             print_progress(current, total, sha)
 
-    result = scan_history(repo, config, branch=branch, limit=limit, progress_callback=_progress)
+    # Filter commits by --since and --author
+    from git_safe_publish.git import get_all_commits as _get_all_commits
+    commits = _get_all_commits(repo, branch=branch)
+    if since:
+        commits = [c for c in commits if c.date >= since]
+    if author:
+        import re
+        commits = [c for c in commits if re.search(author, c.author_email, re.IGNORECASE)]
+    if limit:
+        commits = commits[:limit]
 
-    if not quiet and not output_json:
-        from git_safe_publish.git import get_all_commits
-        total = len(get_all_commits(repo, branch=branch))
-        scanned = min(limit, total) if limit else total
-        print_progress_done(scanned)
+    # Run history scan on the filtered list
+    from git_safe_publish.scanner.history import scan_history
+    result = scan_history(
+        repo, config,
+        progress_callback=_progress, track_dates=exposure,
+        commits=commits,
+    )
+
+    # Metadata scans
+    if metadata:
+        from git_safe_publish.scanner.metadata import (
+            scan_branch_names, scan_tag_annotations, scan_stash,
+            scan_submodules, scan_git_hooks, scan_github_actions,
+        )
+        result.merge(scan_branch_names(repo, config))
+        result.merge(scan_tag_annotations(repo, config))
+        result.merge(scan_stash(repo, config))
+        result.merge(scan_submodules(repo, config))
+        result.merge(scan_git_hooks(repo, config))
+        result.merge(scan_github_actions(repo, config))
+
+    result = _apply_allowlist(result, repo)
+
+    if not quiet and fmt == "table":
+        print_progress_done(len(commits))
         console.print()
 
-    if output_json:
-        print_json(result)
-    else:
-        print_findings(result)
-        print_summary(result, scope="history scan")
-        if remediate and not result.is_clean:
-            print_remediation_detail(result)
+        if exposure and not result.is_clean:
+            from git_safe_publish.scanner.history import compute_exposure_windows
+            windows = compute_exposure_windows(result.findings)
+            if windows:
+                console.print("[bold]Exposure windows:[/bold]")
+                for w in windows:
+                    console.print(f"  [dim]{w.summary}[/dim]")
+                console.print()
 
+    output_result(result, fmt=fmt, scope="history scan", output_path=output_file, show_remediation=remediate)
     sys.exit(_exit_code(result, config))
 
 
@@ -406,25 +486,20 @@ def search(
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED)
-@click.option("--json", "output_json", is_flag=True, default=False, help="Output check results as JSON.")
-@click.option("--skip-checks", is_flag=True, default=False, help="Skip safety checks and push directly.")
-@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
+@click.option("--format", "output_fmt", type=_FORMAT_CHOICES, default="table", show_default=True)
+@click.option("--json", "output_json", is_flag=True, default=False, hidden=True)
+@click.option("--skip-checks", is_flag=True, default=False)
+@click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-push")
 @click.pass_context
-def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_checks: bool, run_test: bool) -> None:
-    """Drop-in replacement for `git push` with pre-push safety checks.
-
-    All arguments after the options are passed directly to `git push`.
-
-    Examples:
-        git-safe-push
-        git-safe-push origin main
-        git-safe-push --force-with-lease origin feature/my-branch
-    """
+def push(ctx, git_args, output_fmt, output_json, skip_checks, run_test) -> None:
+    """Drop-in replacement for `git push` with pre-push safety checks."""
     if run_test:
         sys.exit(_run_tests())
+
     repo = _get_repo()
     config = _load(repo)
+    fmt = "json" if output_json else output_fmt
 
     force = any(a in ("--force", "-f", "--force-with-lease") for a in git_args)
     target_remote = next((a for a in git_args if not a.startswith("-")), "origin")
@@ -434,7 +509,7 @@ def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_
     )
 
     if not skip_checks:
-        if not output_json:
+        if fmt == "table":
             print_header("git-safe-push")
 
         result = _run_full_check(
@@ -446,16 +521,13 @@ def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_
             force=force,
         )
 
-        if output_json:
-            print_json(result)
-            sys.exit(_exit_code(result, config))
+        output_result(result, fmt=fmt, scope="pre-push check")
 
-        print_findings(result)
-        print_summary(result, scope="pre-push check")
+        if fmt != "table":
+            sys.exit(_exit_code(result, config))
 
         if result.has_blockers and config.block_on_secrets:
             console.print("[bold red]✖  Push blocked — critical issues must be resolved first.[/bold red]")
-            console.print()
             sys.exit(1)
 
         if not result.is_clean:
@@ -463,7 +535,6 @@ def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_
                 console.print("[yellow]Push cancelled.[/yellow]")
                 sys.exit(1)
 
-    # Execute the actual git push
     cmd = ["git", "push", *git_args]
     console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
     proc = subprocess.run(cmd, cwd=repo)
@@ -476,39 +547,28 @@ def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_
 
 @click.command("git-safe-publish")
 @click.option("--remote", "target_remote", default="origin", show_default=True)
-@click.option("--branch", "target_branch", default=None, help="Target branch (default: current branch).")
-@click.option("--json", "output_json", is_flag=True, default=False)
-@click.option("--remediate", is_flag=True, default=False, help="Show full remediation steps.")
-@click.option("--dry-run", is_flag=True, default=False, help="Run checks but do not push.")
-@click.option("--force", is_flag=True, default=False, help="Allow force push after confirmation.")
-@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
+@click.option("--branch", "target_branch", default=None)
+@click.option("--format", "output_fmt", type=_FORMAT_CHOICES, default="table", show_default=True)
+@click.option("--json", "output_json", is_flag=True, default=False, hidden=True)
+@click.option("--remediate", is_flag=True, default=False)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--force", is_flag=True, default=False)
+@click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-publish")
-def publish(
-    target_remote: str,
-    target_branch: Optional[str],
-    output_json: bool,
-    remediate: bool,
-    dry_run: bool,
-    force: bool,
-    run_test: bool,
-) -> None:
-    """Full interactive safety check + push workflow.
-
-    Runs all checks, presents a report, confirms author identity,
-    then pushes if the user approves.
-    """
+def publish(target_remote, target_branch, output_fmt, output_json, remediate, dry_run, force, run_test) -> None:
+    """Full interactive safety check + push workflow."""
     if run_test:
         sys.exit(_run_tests())
 
     repo = _get_repo()
     config = _load(repo)
+    fmt = "json" if output_json else output_fmt
 
-    if not output_json:
+    if fmt == "table":
         print_header("git-safe-publish")
 
     branch = target_branch or get_current_branch(repo)
 
-    # ---- Run all checks ---------------------------------------------------
     result = _run_full_check(
         repo, config,
         staged_only=False,
@@ -516,24 +576,18 @@ def publish(
         target_remote=target_remote,
         target_branch=branch,
         force=force,
+        include_metadata=True,
     )
 
-    if output_json:
-        print_json(result)
+    output_result(result, fmt=fmt, scope="full check", show_remediation=remediate)
+
+    if fmt != "table":
         sys.exit(_exit_code(result, config))
 
-    print_findings(result, show_remediation=True)
-    print_summary(result, scope="full check")
-
-    if remediate and not result.is_clean:
-        print_remediation_detail(result)
-
-    # ---- Blocker gate -----------------------------------------------------
     if result.has_blockers and config.block_on_secrets:
         console.print("[bold red]✖  Publish blocked — resolve critical issues before pushing.[/bold red]\n")
         sys.exit(1)
 
-    # ---- Confirm identity -------------------------------------------------
     from git_safe_publish.git import get_author_email, get_author_name
     email = get_author_email(repo) or "not set"
     name = get_author_name(repo) or "not set"
@@ -544,7 +598,7 @@ def publish(
     console.print(f"  Remote  : [bold]{target_remote}[/bold]  {remote_url}")
     console.print(f"  Branch  : [bold]{branch}[/bold]")
     if dry_run:
-        console.print(f"  Mode    : [yellow]dry-run[/yellow] (will not push)")
+        console.print("  Mode    : [yellow]dry-run[/yellow] (will not push)")
     console.print()
 
     if not result.is_clean:
@@ -560,7 +614,6 @@ def publish(
         console.print("[yellow]Dry-run — skipping push.[/yellow]")
         sys.exit(0)
 
-    # ---- Execute push -----------------------------------------------------
     push_args = [target_remote, branch]
     if force:
         push_args = ["--force-with-lease", *push_args]
@@ -571,3 +624,366 @@ def publish(
     if proc.returncode == 0:
         console.print("\n[bold green]✔  Published successfully.[/bold green]")
     sys.exit(proc.returncode)
+
+
+# ---------------------------------------------------------------------------
+# git-safe-hooks
+# ---------------------------------------------------------------------------
+
+_HOOK_TEMPLATES = {
+    "pre-commit": """\
+#!/bin/sh
+# installed by git-safe-publish
+# Scans staged changes for secrets before committing.
+git-safe-check --staged
+""",
+    "commit-msg": """\
+#!/bin/sh
+# installed by git-safe-publish
+# Scans the commit message for embedded secrets.
+MSG=$(cat "$1")
+echo "$MSG" | git-safe-check --staged --no-remote 2>/dev/null || true
+""",
+    "pre-push": """\
+#!/bin/sh
+# installed by git-safe-publish
+# Runs a full check before pushing.
+git-safe-check
+""",
+}
+
+_CI_TEMPLATES = {
+    "github": """\
+# .github/workflows/git-safe-publish.yml
+# Generated by: git-safe-hooks ci github
+name: git-safe-publish
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write  # needed for SARIF upload
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for git-safe-search
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install git-safe-publish
+
+      - name: Scan history for secrets
+        run: git-safe-search --format sarif --output results.sarif
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+""",
+    "gitlab": """\
+# .gitlab-ci.yml snippet
+# Generated by: git-safe-hooks ci gitlab
+git-safe-publish:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - pip install git-safe-publish
+    - git-safe-search --format json --output gl-secret-scan.json || true
+  artifacts:
+    reports:
+      secret_detection: gl-secret-scan.json
+""",
+    "pre-commit": """\
+# .pre-commit-config.yaml entry
+# Generated by: git-safe-hooks ci pre-commit
+repos:
+  - repo: local
+    hooks:
+      - id: git-safe-check
+        name: git-safe-publish secret scan
+        entry: git-safe-check --staged
+        language: system
+        pass_filenames: false
+        stages: [commit]
+""",
+}
+
+
+@click.group("git-safe-hooks")
+def hooks() -> None:
+    """Manage git-safe-publish git hooks and CI integration."""
+
+
+@hooks.command("install")
+@click.option("--hook", "hook_names", multiple=True,
+              type=click.Choice(["pre-commit", "commit-msg", "pre-push"]),
+              help="Which hook(s) to install. Defaults to all three.")
+@click.option("--force", is_flag=True, default=False, help="Overwrite existing hooks.")
+def hooks_install(hook_names, force) -> None:
+    """Install git hooks (pre-commit, commit-msg, pre-push)."""
+    repo = _get_repo()
+    hooks_dir = repo / ".git" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    to_install = list(hook_names) or list(_HOOK_TEMPLATES.keys())
+
+    for name in to_install:
+        path = hooks_dir / name
+        if path.exists() and not force:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            if "git-safe-publish" not in content:
+                console.print(
+                    f"[yellow]  ⚠  Skipping {name} — already exists (use --force to overwrite)[/yellow]"
+                )
+                continue
+        path.write_text(_HOOK_TEMPLATES[name], encoding="utf-8")
+        path.chmod(0o755)
+        console.print(f"[green]  ✔[/green]  Installed .git/hooks/{name}")
+
+    console.print()
+    console.print("[dim]Hooks will run automatically on git commit / git push.[/dim]")
+
+
+@hooks.command("uninstall")
+@click.option("--hook", "hook_names", multiple=True,
+              type=click.Choice(["pre-commit", "commit-msg", "pre-push"]))
+def hooks_uninstall(hook_names) -> None:
+    """Remove git-safe-publish managed hooks."""
+    repo = _get_repo()
+    hooks_dir = repo / ".git" / "hooks"
+    to_remove = list(hook_names) or list(_HOOK_TEMPLATES.keys())
+
+    for name in to_remove:
+        path = hooks_dir / name
+        if not path.exists():
+            console.print(f"[dim]  {name} not found — skipping[/dim]")
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")
+        if "git-safe-publish" not in content:
+            console.print(f"[yellow]  ⚠  {name} was not installed by git-safe-publish — skipping[/yellow]")
+            continue
+        path.unlink()
+        console.print(f"[green]  ✔[/green]  Removed .git/hooks/{name}")
+
+
+@hooks.command("status")
+def hooks_status() -> None:
+    """Show which git-safe-publish hooks are installed."""
+    repo = _get_repo()
+    hooks_dir = repo / ".git" / "hooks"
+    console.print()
+    for name in _HOOK_TEMPLATES:
+        path = hooks_dir / name
+        if not path.exists():
+            console.print(f"  [dim]{name:15}[/dim]  [red]not installed[/red]")
+        else:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            managed = "git-safe-publish" in content
+            tag = "[green]installed (managed)[/green]" if managed else "[yellow]installed (unmanaged)[/yellow]"
+            console.print(f"  [bold]{name:15}[/bold]  {tag}")
+    console.print()
+
+
+@hooks.command("ci")
+@click.argument("platform", type=click.Choice(["github", "gitlab", "pre-commit"]))
+@click.option("--output", "output_file", default=None, help="Write to FILE instead of stdout.")
+def hooks_ci(platform, output_file) -> None:
+    """Generate a CI integration snippet for the given platform."""
+    template = _CI_TEMPLATES[platform]
+    if output_file:
+        Path(output_file).write_text(template, encoding="utf-8")
+        console.print(f"[green]✔[/green] CI config written to {output_file}")
+    else:
+        click.echo(template)
+
+
+# ---------------------------------------------------------------------------
+# git-safe-fix
+# ---------------------------------------------------------------------------
+
+@click.command("git-safe-fix")
+@click.option("--history", is_flag=True, default=False, help="Scan full history then generate remediation commands.")
+@click.option("--branch", default="--all", show_default=True)
+@click.option("--limit", default=None, type=int)
+@click.option("--output", "output_file", default=None, help="Write remediation script to FILE.")
+@click.option("--test", "run_test", is_flag=True, default=False)
+@click.version_option(__version__, prog_name="git-safe-fix")
+def fix(history, branch, limit, output_file, run_test) -> None:
+    """Generate guided remediation commands for history findings.
+
+    Scans staged changes (or full history with --history), then produces
+    exact `git filter-repo` commands to remove secrets.
+    """
+    if run_test:
+        sys.exit(_run_tests())
+
+    repo = _get_repo()
+    config = _load(repo)
+
+    print_header("git-safe-fix")
+
+    if history:
+        if not has_commits(repo):
+            console.print("[yellow]No commits yet.[/yellow]")
+            sys.exit(0)
+        console.print("[dim]Scanning full history…[/dim]\n")
+
+        def _prog(cur, tot, sha):
+            print_progress(cur, tot, sha)
+
+        result = scan_history(repo, config, branch=branch, limit=limit,
+                              progress_callback=_prog, track_dates=True)
+        print_progress_done(limit or 0)
+        console.print()
+    else:
+        diff = get_staged_diff(repo)
+        result = ScanResult()
+        if diff:
+            result.merge(scan_diff(diff, config))
+
+    result = _apply_allowlist(result, repo)
+
+    if result.is_clean:
+        console.print("[bold green]✔  No findings — nothing to fix.[/bold green]")
+        sys.exit(0)
+
+    print_findings(result)
+    print_summary(result, scope="fix scan")
+
+    # Generate remediation script
+    lines = ["#!/bin/sh", "# Remediation script generated by git-safe-fix", "# Review carefully before running!\n"]
+
+    # Group unique filenames with secrets
+    files_with_secrets: dict = {}
+    for f in result.findings:
+        if f.filename and not f.filename.startswith("<"):
+            files_with_secrets.setdefault(f.filename, []).append(f.check_name)
+
+    if files_with_secrets:
+        lines.append("# --- Remove files containing secrets from entire history ---")
+        for filepath, checks in files_with_secrets.items():
+            lines.append(f"# Checks: {', '.join(set(checks))}")
+            lines.append(f"git filter-repo --path {filepath} --invert-paths")
+            lines.append("")
+
+    # Suggest replace-text for specific secret values
+    lines.append("# --- Or redact specific secret values in history ---")
+    lines.append("# Create a replacements file, then run:")
+    lines.append("# git filter-repo --replace-text replacements.txt")
+    lines.append("# Format of replacements.txt: LITERAL:old_value==>REDACTED")
+    lines.append("")
+
+    # Exposure window summary
+    from git_safe_publish.scanner.history import compute_exposure_windows
+    windows = compute_exposure_windows(result.findings)
+    if windows:
+        lines.append("# --- Exposure windows ---")
+        for w in windows:
+            lines.append(f"# {w.summary}")
+        lines.append("")
+
+    lines.append("# After rewriting history:")
+    lines.append("# git push --force-with-lease origin <branch>")
+    lines.append("# Notify all collaborators to re-clone or reset their forks.")
+
+    script = "\n".join(lines)
+
+    if output_file:
+        Path(output_file).write_text(script, encoding="utf-8")
+        console.print(f"\n[green]✔[/green] Remediation script written to [bold]{output_file}[/bold]")
+    else:
+        console.print("\n[bold]Remediation script:[/bold]\n")
+        for line in script.splitlines():
+            style = "dim" if line.startswith("#") else ""
+            console.print(f"  [{style}]{line}[/{style}]" if style else f"  {line}")
+
+    sys.exit(1 if result.has_blockers else 0)
+
+
+# ---------------------------------------------------------------------------
+# git-safe-scan  (arbitrary files / dirs, no git repo required)
+# ---------------------------------------------------------------------------
+
+@click.command("git-safe-scan")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option("--format", "output_fmt", type=_FORMAT_CHOICES, default="table", show_default=True)
+@click.option("--json", "output_json", is_flag=True, default=False, hidden=True)
+@click.option("--output", "output_file", default=None)
+@click.option("--severity", "severity_threshold", default="P2", show_default=True,
+              type=click.Choice(["P0", "P1", "P2", "P3"]))
+@click.option("--ignore", "ignore_globs", multiple=True, metavar="GLOB", help="Glob patterns to skip.")
+@click.option("--remediate", is_flag=True, default=False)
+@click.option("--test", "run_test", is_flag=True, default=False)
+@click.version_option(__version__, prog_name="git-safe-scan")
+def scan(paths, output_fmt, output_json, output_file, severity_threshold, ignore_globs, remediate, run_test) -> None:
+    """Scan arbitrary files or directories for secrets — no git repo required.
+
+    Examples:
+        git-safe-scan ./config-backup/
+        git-safe-scan settings.py .env --format json
+        git-safe-scan /tmp/export/ --severity P1 --output report.sarif --format sarif
+    """
+    if run_test:
+        sys.exit(_run_tests())
+
+    from git_safe_publish.config import Config, DEFAULTS
+    import fnmatch
+
+    config = Config({**DEFAULTS, "severity_threshold": severity_threshold,
+                     "ignore_paths": list(ignore_globs)})
+    fmt = "json" if output_json else output_fmt
+
+    if fmt == "table":
+        print_header("git-safe-scan")
+
+    result = ScanResult()
+
+    _BINARY_EXTS = {
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
+        ".pdf", ".zip", ".gz", ".tar", ".whl", ".egg",
+        ".pyc", ".pyd", ".so", ".dylib", ".dll", ".exe",
+        ".db", ".sqlite", ".sqlite3",
+    }
+
+    all_files: list[Path] = []
+    for raw_path in paths:
+        p = Path(raw_path)
+        if p.is_file():
+            all_files.append(p)
+        elif p.is_dir():
+            for child in p.rglob("*"):
+                if child.is_file():
+                    all_files.append(child)
+
+    scanned = 0
+    for file_path in all_files:
+        rel = str(file_path)
+        if config.is_path_ignored(rel):
+            continue
+        if any(fnmatch.fnmatch(file_path.name, g) for g in ignore_globs):
+            continue
+        if file_path.suffix.lower() in _BINARY_EXTS:
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        result.merge(scan_file_content(content, rel, config))
+        scanned += 1
+
+    if fmt == "table":
+        console.print(f"[dim]Scanned {scanned} file(s).[/dim]\n")
+
+    output_result(result, fmt=fmt, scope=f"scan ({scanned} files)",
+                  output_path=output_file, show_remediation=remediate)
+    sys.exit(0 if result.is_clean else 1)

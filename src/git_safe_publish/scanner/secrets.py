@@ -99,9 +99,13 @@ def _scan_line(
     commit_sha: str = "",
     commit_message: str = "",
 ) -> List[Finding]:
+    from git_safe_publish.allowlist import is_inline_suppressed
+
     findings: List[Finding] = []
 
     for pattern in patterns:
+        if is_inline_suppressed(content, pattern.name):
+            continue
         for match in pattern.findall(content):
             matched_value = match.group(0)
             # Grab the last capturing group if present (usually the secret value).

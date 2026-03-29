@@ -387,6 +387,15 @@ PATTERNS: List[Pattern] = [
         category="Code Quality",
         description="Commented-out credential",
     ),
+
+    # Absolute path disclosure (P2)
+    Pattern(
+        name="absolute-path-disclosure",
+        regex=r"(?<!['\"\w])(\/home\/[a-zA-Z0-9_\-]+|\/Users\/[a-zA-Z0-9_\-]+)(\/[^\s\"'<>]*){2,}",
+        severity="P2",
+        category="Infrastructure",
+        description="Absolute path leaking local username or internal directory structure",
+    ),
 ]
 
 

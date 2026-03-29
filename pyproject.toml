@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "git-safe-publish"
-version = "0.2.0"
+version = "0.3.0"
 description = "CLI toolchain to detect and prevent accidental publication of sensitive data via git"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -22,6 +22,9 @@ git-safe-push    = "git_safe_publish.cli:push"
 git-safe-commit  = "git_safe_publish.cli:commit"
 git-safe-check   = "git_safe_publish.cli:check"
 git-safe-search  = "git_safe_publish.cli:search"
+git-safe-hooks   = "git_safe_publish.cli:hooks"
+git-safe-fix     = "git_safe_publish.cli:fix"
+git-safe-scan    = "git_safe_publish.cli:scan"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/git_safe_publish"]
