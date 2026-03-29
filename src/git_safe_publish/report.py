@@ -258,7 +258,7 @@ def print_patterns_table() -> None:
 # SARIF output
 # ---------------------------------------------------------------------------
 
-def format_as_sarif(result, tool_version: str = "0.3.0") -> dict:
+def format_as_sarif(result, tool_version: str = "1.0.0") -> dict:
     """Return a SARIF 2.1.0 dict for the given ScanResult."""
     from git_safe_publish.patterns import PATTERNS
 
