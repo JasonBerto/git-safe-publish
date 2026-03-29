@@ -127,7 +127,7 @@ def write_default_config(path: Path) -> None:
     """Write a commented default config file to *path*."""
     template = """\
 # git-safe-publish configuration
-# https://github.com/your-org/git-safe-publish
+# https://github.com/JasonBerto/git-safe-publish
 
 # Regex patterns for allowed remote URLs (empty = all allowed, with warnings)
 allowed_remotes: []

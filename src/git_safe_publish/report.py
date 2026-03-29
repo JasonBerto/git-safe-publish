@@ -317,7 +317,7 @@ def format_as_sarif(result, tool_version: str = "1.0.0") -> dict:
                 "driver": {
                     "name": "git-safe-publish",
                     "version": tool_version,
-                    "informationUri": "https://github.com/your-org/git-safe-publish",
+                    "informationUri": "https://github.com/JasonBerto/git-safe-publish",
                     "rules": rules,
                 }
             },
