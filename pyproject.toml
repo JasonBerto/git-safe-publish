@@ -9,12 +9,37 @@ description = "CLI toolchain to detect and prevent accidental publication of sen
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-keywords = ["git", "security", "secrets", "cli", "devtools"]
+authors = [
+    { name = "Jason", email = "jasonpmedia@gmail.com" },
+]
+keywords = ["git", "security", "secrets", "cli", "devtools", "secret-scanning", "pre-commit"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage      = "https://github.com/JasonBerto/git-safe-publish"
+Repository    = "https://github.com/JasonBerto/git-safe-publish"
+Documentation = "https://github.com/JasonBerto/git-safe-publish#readme"
+"Bug Tracker" = "https://github.com/JasonBerto/git-safe-publish/issues"
 
 [project.scripts]
 git-safe-publish = "git_safe_publish.cli:publish"
