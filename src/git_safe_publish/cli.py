@@ -54,6 +54,57 @@ from git_safe_publish.scanner.secrets import scan_diff
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _find_tests_dir() -> Optional[Path]:
+    """Locate the tests/ directory.
+
+    Priority:
+      1. Two levels above this file (works in editable / source installs).
+      2. tests/ at the root of the current git repository.
+    """
+    # src/git_safe_publish/cli.py → ../../tests
+    candidate = Path(__file__).parent.parent.parent / "tests"
+    if candidate.is_dir():
+        return candidate.resolve()
+
+    try:
+        repo_tests = find_repo_root() / "tests"
+        if repo_tests.is_dir():
+            return repo_tests.resolve()
+    except NotAGitRepo:
+        pass
+
+    return None
+
+
+def _run_tests(verbose: bool = False) -> int:
+    """Run the test suite via pytest and return its exit code."""
+    tests_dir = _find_tests_dir()
+
+    if tests_dir is None:
+        console.print("[bold red]Error:[/bold red] Could not find a tests/ directory.")
+        console.print(
+            "[dim]--test is intended for development use. "
+            "Run from the project root, or install in editable mode.[/dim]"
+        )
+        return 2
+
+    print_header("git-safe-publish — test suite")
+    console.print(f"[dim]Running tests from: {tests_dir}[/dim]\n")
+
+    cmd = [sys.executable, "-m", "pytest", str(tests_dir)]
+    if verbose:
+        cmd.append("-v")
+    else:
+        cmd.append("-v")  # always verbose for human runs; CI can pipe to --json
+
+    proc = subprocess.run(cmd)
+    if proc.returncode == 0:
+        console.print("\n[bold green]✔  All tests passed.[/bold green]")
+    else:
+        console.print("\n[bold red]✖  Tests failed.[/bold red]")
+    return proc.returncode
+
+
 def _get_repo() -> Path:
     try:
         return find_repo_root()
@@ -131,6 +182,7 @@ def _run_full_check(
 @click.option("--no-remote", is_flag=True, default=False, help="Skip remote / branch checks.")
 @click.option("--remediate", is_flag=True, default=False, help="Show full remediation steps.")
 @click.option("--init-config", is_flag=True, default=False, help="Write a default .git-safe-publish.yml and exit.")
+@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
 @click.version_option(__version__, prog_name="git-safe-check")
 def check(
     staged: bool,
@@ -140,11 +192,15 @@ def check(
     no_remote: bool,
     remediate: bool,
     init_config: bool,
+    run_test: bool,
 ) -> None:
     """Scan staged and tracked content for secrets and safety issues.
 
     Exits 0 if clean, 1 if issues found, 2 on error.
     """
+    if run_test:
+        sys.exit(_run_tests())
+
     repo = _get_repo()
     config = _load(repo)
 
@@ -186,6 +242,7 @@ def check(
 @click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
 @click.option("--remediate", is_flag=True, default=False, help="Show full remediation steps.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress progress output.")
+@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
 @click.version_option(__version__, prog_name="git-safe-search")
 def search(
     branch: str,
@@ -193,12 +250,16 @@ def search(
     output_json: bool,
     remediate: bool,
     quiet: bool,
+    run_test: bool,
 ) -> None:
     """Deep-scan full commit history for secrets and sensitive data.
 
     Scans every commit's diff and message for secret patterns.
     Exits 0 if clean, 1 if issues found, 2 on error.
     """
+    if run_test:
+        sys.exit(_run_tests())
+
     repo = _get_repo()
     config = _load(repo)
 
@@ -246,9 +307,10 @@ def search(
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED)
 @click.option("--json", "output_json", is_flag=True, default=False, help="Output check results as JSON.")
 @click.option("--skip-checks", is_flag=True, default=False, help="Skip safety checks and push directly.")
+@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
 @click.version_option(__version__, prog_name="git-safe-push")
 @click.pass_context
-def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_checks: bool) -> None:
+def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_checks: bool, run_test: bool) -> None:
     """Drop-in replacement for `git push` with pre-push safety checks.
 
     All arguments after the options are passed directly to `git push`.
@@ -258,6 +320,8 @@ def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_
         git-safe-push origin main
         git-safe-push --force-with-lease origin feature/my-branch
     """
+    if run_test:
+        sys.exit(_run_tests())
     repo = _get_repo()
     config = _load(repo)
 
@@ -316,6 +380,7 @@ def push(ctx: click.Context, git_args: Tuple[str, ...], output_json: bool, skip_
 @click.option("--remediate", is_flag=True, default=False, help="Show full remediation steps.")
 @click.option("--dry-run", is_flag=True, default=False, help="Run checks but do not push.")
 @click.option("--force", is_flag=True, default=False, help="Allow force push after confirmation.")
+@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
 @click.version_option(__version__, prog_name="git-safe-publish")
 def publish(
     target_remote: str,
@@ -324,12 +389,16 @@ def publish(
     remediate: bool,
     dry_run: bool,
     force: bool,
+    run_test: bool,
 ) -> None:
     """Full interactive safety check + push workflow.
 
     Runs all checks, presents a report, confirms author identity,
     then pushes if the user approves.
     """
+    if run_test:
+        sys.exit(_run_tests())
+
     repo = _get_repo()
     config = _load(repo)
 
