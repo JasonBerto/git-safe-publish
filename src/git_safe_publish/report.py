@@ -209,7 +209,8 @@ def print_json(result: ScanResult) -> None:
 def confirm(message: str, default: bool = False) -> bool:
     suffix = " [Y/n] " if default else " [y/N] "
     try:
-        answer = input(message + suffix).strip().lower()
+        console.print(message, end="")
+        answer = input(suffix).strip().lower()
     except (EOFError, KeyboardInterrupt):
         console.print()
         return False
