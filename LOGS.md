@@ -52,40 +52,73 @@ Full Python implementation of the `git-safe-publish` CLI toolchain.
 
 ---
 
-## Phase 3 — Planned: Usability & Hook Integration
+## Phase 3 — Usability & Hook Integration - 2026-03-28
 
 ### Scope
-- [ ] `git-safe-hooks` command (install / uninstall / status for pre-commit, commit-msg, pre-push)
-- [ ] Inline suppression comments (`# gsp-ignore: <check-name>`)
-- [ ] `--base BRANCH` option for `git-safe-check` (PR diff mode — scan only changed lines)
-- [ ] `--watch` option for `git-safe-check` (re-scan on file change)
-- [ ] `--output FILE` for `git-safe-search`
-- [ ] `--list-patterns` for `git-safe-check`
+- [x] `git-safe-hooks` command (install / uninstall / status for pre-commit, commit-msg, pre-push)
+- [x] `git-safe-hooks ci` — generate GitHub Actions / GitLab CI / pre-commit YAML snippets
+- [x] Inline suppression comments (`# gsp-ignore` or `# gsp-ignore: check-name`) in `scanner/secrets.py`
+- [x] `--base BRANCH` option for `git-safe-check` (PR diff mode — scan only changed lines)
+- [x] `--watch` option for `git-safe-check` (re-run checks every 3 s until Ctrl+C)
+- [x] `--output FILE` and `--format table|json|sarif|markdown` on `git-safe-check`, `git-safe-search`
+- [x] `--list-patterns` for `git-safe-check` (rich table of all built-in patterns)
+- [x] `--test-pattern / --against` for `git-safe-check` (test a custom regex interactively)
+- [x] `--since DATE` and `--author PATTERN` filters for `git-safe-search`
 
 ---
 
-## Phase 4 — Planned: Advanced Detection & Remediation
+## Phase 4 — Advanced Detection & Remediation - 2026-03-28
 
 ### Scope
-- [ ] Branch name scanning for embedded secrets
-- [ ] Tag annotation scanning
-- [ ] Git stash scanning
-- [ ] Submodule URL scanning (internal repos in public projects)
-- [ ] Absolute path disclosure detection (`/home/username/...`)
-- [ ] Malicious `.git/hooks` detection
-- [ ] GitHub Actions misconfiguration checks (`pull_request_target`, `write-all`)
-- [ ] `git-safe-fix` command — guided remediation with `git filter-repo` / BFG commands
-- [ ] Exposure window reporting (first introduced → last seen date)
-- [ ] Allowlist file (`.git-safe-allowlist.yml`) for persistent false-positive suppression
+- [x] `scanner/metadata.py` — branch name scanning for embedded secrets
+- [x] Tag annotation message scanning
+- [x] Git stash scanning (description + diff)
+- [x] Submodule URL scanning (internal hostnames, private IPs)
+- [x] Malicious / unmanaged `.git/hooks` detection
+- [x] GitHub Actions misconfiguration checks (`pull_request_target`, `write-all`, unpinned actions)
+- [x] Absolute path disclosure pattern added to `patterns.py`
+- [x] `git-safe-fix` command — exposure window reporting + `git filter-repo` remediation script
+- [x] `allowlist.py` — `Allowlist` / `AllowlistEntry` for persistent false-positive suppression
+- [x] `--metadata` flag on `git-safe-check` and `git-safe-search` to run all metadata scans
 
 ---
 
-## Phase 5 — Planned: CI/CD Integration & Output Formats
+## Phase 5 — CI/CD Integration & Output Formats - 2026-03-28
 
 ### Scope
-- [ ] SARIF output (`--format sarif`) — GitHub Code Scanning integration
-- [ ] Markdown output (`--format markdown`) — PR comment formatting
-- [ ] CI integration helper (`git-safe-hooks ci github/gitlab/pre-commit`)
-- [ ] Pattern testing utility (`--test-pattern`, `--list-patterns`)
-- [ ] `git-safe-scan` command — scan arbitrary files/dirs outside a git repo
+- [x] SARIF 2.1.0 output (`--format sarif`) — GitHub Code Scanning integration
+- [x] Markdown output (`--format markdown`) — PR comment / report formatting
+- [x] `output_result()` dispatcher in `report.py` — unified format/output routing
+- [x] `git-safe-hooks ci github/gitlab/pre-commit` — CI snippet generator
+- [x] `git-safe-scan` command — scan arbitrary files/dirs outside a git repo
+- [x] `print_patterns_table()` in `report.py` for `--list-patterns`
+- [x] 34 new tests in `tests/test_phase3_5.py` covering all new features
+
+---
+
+## v0.3.0 — Summary - 2026-03-28
+
+### New commands
+| Command | Description |
+|---|---|
+| `git-safe-hooks install/uninstall/status` | Manage pre-commit, commit-msg, pre-push hooks |
+| `git-safe-hooks ci github\|gitlab\|pre-commit` | Generate CI YAML snippets |
+| `git-safe-fix` | Guided remediation with `git filter-repo` commands + exposure windows |
+| `git-safe-scan` | Scan arbitrary files/dirs — no git repo required |
+
+### New flags on existing commands
+| Flag | Command | Description |
+|---|---|---|
+| `--base BRANCH` | `git-safe-check` | PR-style diff scan |
+| `--watch` | `git-safe-check` | Continuous re-scan |
+| `--list-patterns` | `git-safe-check` | Show all patterns |
+| `--test-pattern` / `--against` | `git-safe-check` | Test a regex inline |
+| `--metadata` | `git-safe-check`, `git-safe-search` | Run metadata scanners |
+| `--format sarif\|markdown\|json\|table` | all | Output format selector |
+| `--output FILE` | all | Write report to file |
+| `--exposure` | `git-safe-search` | Show first/last-seen dates |
+| `--since DATE` / `--author` | `git-safe-search` | Commit filters |
+
+### Tests
+- **102 tests passing** (was 68)
 
