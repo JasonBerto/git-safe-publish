@@ -140,7 +140,24 @@ def _run_full_check(
     force: bool = False,
     base_branch: Optional[str] = None,
     include_metadata: bool = False,
+    verbose: bool = False,
 ) -> ScanResult:
+
+    def _step(label: str, fn, *args, **kwargs) -> ScanResult:
+        """Run a check, optionally printing a verbose step line."""
+        if verbose:
+            console.print(f"  [dim]→[/dim]  {label:<45}", end="")
+        sub = fn(*args, **kwargs)
+        if verbose:
+            count = len(sub.findings)
+            if count == 0:
+                console.print("[green]✔  clean[/green]")
+            elif any(f.severity.value in ("P0", "P1") for f in sub.findings):
+                console.print(f"[red]✖  {count} finding(s)[/red]")
+            else:
+                console.print(f"[yellow]⚠  {count} finding(s)[/yellow]")
+        return sub
+
     result = ScanResult()
 
     # 1. Secret scan on staged diff (or base-diff if --base provided)
@@ -149,28 +166,34 @@ def _run_full_check(
     else:
         diff = get_staged_diff(repo)
     if diff:
-        result.merge(scan_diff(diff, config))
+        result.merge(_step("Scanning staged diff for secrets…", scan_diff, diff, config))
+    elif verbose:
+        console.print("  [dim]→[/dim]  [dim]Scanning staged diff for secrets…[/dim]" + " " * 3 + "[dim]—  nothing staged[/dim]")
 
     # 2. Sensitive file detection
     staged_files = get_staged_files(repo)
     if staged_files:
-        result.merge(scan_staged_files(staged_files, config))
+        result.merge(_step("Scanning staged file types…", scan_staged_files, staged_files, config))
+    elif verbose:
+        console.print("  [dim]→[/dim]  [dim]Scanning staged file types…[/dim]" + " " * 13 + "[dim]—  nothing staged[/dim]")
 
     if not staged_only and not base_branch:
         tracked = get_tracked_files(repo)
-        result.merge(scan_tracked_files(tracked, config))
+        if tracked:
+            result.merge(_step("Scanning tracked file types…", scan_tracked_files, tracked, config))
 
     # 3. .gitignore audit
     if config.check_gitignore:
-        result.merge(scan_gitignore(repo, config))
+        result.merge(_step("Auditing .gitignore coverage…", scan_gitignore, repo, config))
 
     # 4. Identity check
     if config.check_identity:
-        result.merge(scan_identity(repo, config))
+        result.merge(_step("Checking committer identity…", scan_identity, repo, config))
 
     # 5. Remote / branch safety
     if check_remote_flag and config.check_remote and get_remotes(repo):
-        result.merge(scan_remote(repo, config, target_remote, target_branch, force))
+        result.merge(_step("Checking remote & branch safety…", scan_remote, repo, config,
+                           target_remote, target_branch, force))
 
     # 6. Metadata checks (Phase 4)
     if include_metadata:
@@ -178,11 +201,14 @@ def _run_full_check(
             scan_branch_names, scan_tag_annotations, scan_submodules,
             scan_git_hooks, scan_github_actions,
         )
-        result.merge(scan_branch_names(repo, config))
-        result.merge(scan_tag_annotations(repo, config))
-        result.merge(scan_submodules(repo, config))
-        result.merge(scan_git_hooks(repo, config))
-        result.merge(scan_github_actions(repo, config))
+        result.merge(_step("Scanning branch names…", scan_branch_names, repo, config))
+        result.merge(_step("Scanning tag annotations…", scan_tag_annotations, repo, config))
+        result.merge(_step("Scanning submodule URLs…", scan_submodules, repo, config))
+        result.merge(_step("Checking .git/hooks integrity…", scan_git_hooks, repo, config))
+        result.merge(_step("Scanning GitHub Actions workflows…", scan_github_actions, repo, config))
+
+    if verbose:
+        console.print()
 
     return _apply_allowlist(result, repo)
 
@@ -228,6 +254,7 @@ _FORMAT_CHOICES = click.Choice(["table", "json", "sarif", "markdown"], case_sens
 @click.option("--list-patterns", is_flag=True, default=False, help="Print all built-in secret patterns and exit.")
 @click.option("--test-pattern", default=None, metavar="REGEX", help="Test a custom regex against --against value.")
 @click.option("--against", default=None, metavar="VALUE", help="Value to test with --test-pattern.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Print each check as it runs with a pass/fail indicator.")
 @click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
 @click.version_option(__version__, prog_name="git-safe-check")
 def check(
@@ -235,7 +262,7 @@ def check(
     output_fmt, output_json, output_file,
     no_remote, remediate, metadata, watch,
     init_config, list_patterns, test_pattern, against,
-    run_test,
+    verbose, run_test,
 ) -> None:
     """Scan staged/tracked content for secrets and safety issues.
 
@@ -283,6 +310,7 @@ def check(
             target_branch=target_branch,
             base_branch=base_branch,
             include_metadata=metadata,
+            verbose=verbose,
         )
         if fmt == "table":
             print_header("git-safe-check")
@@ -553,9 +581,10 @@ def push(ctx, git_args, output_fmt, output_json, skip_checks, run_test) -> None:
 @click.option("--remediate", is_flag=True, default=False)
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--force", is_flag=True, default=False)
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Print each check as it runs with a pass/fail indicator.")
 @click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-publish")
-def publish(target_remote, target_branch, output_fmt, output_json, remediate, dry_run, force, run_test) -> None:
+def publish(target_remote, target_branch, output_fmt, output_json, remediate, dry_run, force, verbose, run_test) -> None:
     """Full interactive safety check + push workflow."""
     if run_test:
         sys.exit(_run_tests())
@@ -577,6 +606,7 @@ def publish(target_remote, target_branch, output_fmt, output_json, remediate, dr
         target_branch=branch,
         force=force,
         include_metadata=True,
+        verbose=verbose,
     )
 
     output_result(result, fmt=fmt, scope="full check", show_remediation=remediate)
