@@ -275,4 +275,4 @@ A global config at `~/.git-safe-publish.yml` applies to all repositories.
 
 If you find this tool useful, consider buying me a coffee ☕
 
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/jason_unix)
+[![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/jason_unix)
