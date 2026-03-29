@@ -39,3 +39,53 @@ Full Python implementation of the `git-safe-publish` CLI toolchain.
 - **Exit codes 0/1/2** — distinguishable by CI (clean / issues / tool error)
 
 ---
+
+## Phase 2 — `git-safe-commit`, `--test` flag, Demo Tests, v0.2.0 - 2026-03-28
+
+- [x] Added `git-safe-commit` command — drop-in for `git commit` with staged diff, sensitive file, commit message, identity, and `.gitignore` scanning
+- [x] Added `--test` flag to all five commands — runs `pytest tests/` via subprocess, output visible via `-s`
+- [x] Added `tests/test_commit.py` — 13 tests for `_extract_commit_message` and `scan_commit_message`
+- [x] Added `tests/test_live_detection.py` — 4 demo scenarios creating real `test_file_*` temp files with embedded secrets (config.py, .env, Dockerfile, clean config)
+- [x] Fixed `AttributeError` in `_scan_line` when optional regex capture group returns `None`
+- [x] Bumped version to `0.2.0` in both `pyproject.toml` and `__init__.py`
+- [x] 68 tests passing
+
+---
+
+## Phase 3 — Planned: Usability & Hook Integration
+
+### Scope
+- [ ] `git-safe-hooks` command (install / uninstall / status for pre-commit, commit-msg, pre-push)
+- [ ] Inline suppression comments (`# gsp-ignore: <check-name>`)
+- [ ] `--base BRANCH` option for `git-safe-check` (PR diff mode — scan only changed lines)
+- [ ] `--watch` option for `git-safe-check` (re-scan on file change)
+- [ ] `--output FILE` for `git-safe-search`
+- [ ] `--list-patterns` for `git-safe-check`
+
+---
+
+## Phase 4 — Planned: Advanced Detection & Remediation
+
+### Scope
+- [ ] Branch name scanning for embedded secrets
+- [ ] Tag annotation scanning
+- [ ] Git stash scanning
+- [ ] Submodule URL scanning (internal repos in public projects)
+- [ ] Absolute path disclosure detection (`/home/username/...`)
+- [ ] Malicious `.git/hooks` detection
+- [ ] GitHub Actions misconfiguration checks (`pull_request_target`, `write-all`)
+- [ ] `git-safe-fix` command — guided remediation with `git filter-repo` / BFG commands
+- [ ] Exposure window reporting (first introduced → last seen date)
+- [ ] Allowlist file (`.git-safe-allowlist.yml`) for persistent false-positive suppression
+
+---
+
+## Phase 5 — Planned: CI/CD Integration & Output Formats
+
+### Scope
+- [ ] SARIF output (`--format sarif`) — GitHub Code Scanning integration
+- [ ] Markdown output (`--format markdown`) — PR comment formatting
+- [ ] CI integration helper (`git-safe-hooks ci github/gitlab/pre-commit`)
+- [ ] Pattern testing utility (`--test-pattern`, `--list-patterns`)
+- [ ] `git-safe-scan` command — scan arbitrary files/dirs outside a git repo
+

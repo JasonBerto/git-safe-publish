@@ -54,12 +54,101 @@ Reference `SECURITY_RISKS.md` for the full threat model this tool addresses.
 
 ## Commands
 
+### Implemented (v0.2.0)
+
 | Command | Description |
 |---|---|
-| `git-safe-publish` | Full pre-publish check: secrets, identity, remote safety, `.gitignore`. Interactive confirmation before push. |
-| `git-safe-push` | Drop-in replacement for `git push`. Runs safety checks then pushes if clean. |
-| `git-safe-check` | Run all checks without pushing. Outputs a report. Exit code 0 = clean. |
-| `git-safe-search` | Deep scan of full commit history. Finds secrets/issues buried in old commits. |
+| `git-safe-check` | Scan staged/tracked files. Exits 0 = clean, 1 = issues, 2 = error. |
+| `git-safe-commit` | Drop-in for `git commit` — scans staged changes and commit message before committing. |
+| `git-safe-push` | Drop-in for `git push` — runs pre-push safety checks. |
+| `git-safe-publish` | Interactive full check + confirm identity + push. |
+| `git-safe-search` | Deep-scan entire commit history. |
+
+### Planned
+
+| Command | Description | Priority |
+|---|---|---|
+| `git-safe-hooks` | Install / uninstall / status git hooks (pre-commit, commit-msg, pre-push). Single command onboarding. | P0 |
+| `git-safe-fix` | Guided remediation — generate exact `git filter-repo` / BFG commands to remove secrets from history. | P0 |
+| `git-safe-scan` | Scan arbitrary files or directories outside a git repository (archives, backups, exports). | P1 |
+
+---
+
+## Planned Features & Options
+
+### Phase 3 — Usability & Hook Integration
+
+#### `git-safe-hooks` command
+- `git-safe-hooks install` — writes `pre-commit`, `commit-msg`, and `pre-push` hook scripts
+- `git-safe-hooks uninstall` — removes managed hooks
+- `git-safe-hooks status` — shows which hooks are installed and their content
+
+#### Inline suppression (`# gsp-ignore`)
+- Add `# gsp-ignore: <check-name>` comment on a line to suppress a specific finding
+- `# gsp-ignore` (no check name) suppresses all findings on that line
+- Without this, repos with test fixtures or example credentials will always fail — kills adoption
+
+#### `--base BRANCH` option for `git-safe-check`
+- Scan only lines changed relative to a base branch (e.g., `--base main`)
+- Critical for CI/CD PR checks — avoids re-scanning the entire codebase on every PR
+- Example: `git-safe-check --base origin/main`
+
+#### `--watch` option for `git-safe-check`
+- Re-scan on file save, providing a real-time developer feedback loop
+- Powered by filesystem events (polling fallback for compatibility)
+
+#### `--output FILE` for `git-safe-search`
+- Write the findings report to a file for audit archiving
+- Supports `--format` selection (table, json, markdown, sarif)
+
+### Phase 4 — Advanced Detection & Remediation
+
+#### Missing checks from threat model
+- **Branch name scanning** — detect secrets in branch names (`fix/prod-token-abc123`)
+- **Tag annotation scanning** — scan annotated tag messages for secrets
+- **Git stash scanning** — scan stash entries (`git stash list`)
+- **Submodule URL scanning** — warn when submodule URLs point to internal/private repos
+- **Absolute path disclosure** — flag `/home/username/...` paths leaking internal usernames
+- **Malicious hook detection** — warn when unexpected executable scripts exist in `.git/hooks/`
+- **GitHub Actions misconfig** — detect `pull_request_target` trigger and `write-all` permissions
+
+#### `git-safe-fix` command
+- For each finding in history, generate the exact remediation command:
+  - `git filter-repo --path <file> --invert-paths` to purge a file
+  - `git filter-repo --replace-text <expressions-file>` to redact a value
+  - BFG Repo Cleaner equivalent commands
+- Interactive mode: walk through each finding with a suggested fix
+- Exposure window report: "This secret was in your history from 2024-01-15 to 2024-03-22 (66 days)"
+
+#### Allowlist file (`.git-safe-allowlist.yml`)
+- Persist false-positive suppressions by `check_name + filename + content-hash`
+- `git-safe-check --allow <finding-id>` to add a finding to the allowlist
+- Companion to inline suppression for binary files or third-party files
+
+### Phase 5 — CI/CD Integration & Output Formats
+
+#### SARIF output (`--format sarif`)
+- SARIF (Static Analysis Results Interchange Format) — uploadable to GitHub Code Scanning
+- Enables inline PR annotations on the GitHub UI
+- `git-safe-search --format sarif --output results.sarif`
+
+#### Markdown output (`--format markdown`)
+- Formatted for posting as a PR comment via GitHub Actions
+- Includes severity badges, file links, and remediation hints
+
+#### CI integration helper
+- `git-safe-hooks ci github` — generate a ready-to-use `.github/workflows/git-safe-publish.yml`
+- `git-safe-hooks ci gitlab` — generate `.gitlab-ci.yml` snippet
+- `git-safe-hooks ci pre-commit` — generate `.pre-commit-config.yaml` entry
+
+#### Pattern testing utility
+- `git-safe-check --test-pattern "MYCO-[A-Za-z0-9]{32}" --against "MYCO-abc123..."` — verify a custom pattern matches before adding to config
+- `git-safe-check --list-patterns` — print all built-in patterns with examples
+
+#### `git-safe-scan` command
+- Scan arbitrary files or directories, no git repo required
+- `git-safe-scan ./config-backup/ --format json`
+- Useful for scanning archives, exported configs, CI artifacts
 
 ---
 
@@ -88,16 +177,32 @@ git-safe-publish/
 ├── README.md
 ├── DESIGN.md
 ├── SECURITY_RISKS.md
-└── (src/ — TBD based on language/framework choice)
+├── pyproject.toml
+└── src/
+    └── git_safe_publish/
+        ├── __init__.py
+        ├── cli.py          # All Click commands
+        ├── config.py       # YAML config loading
+        ├── git.py          # Subprocess git wrapper
+        ├── models.py       # Finding, ScanResult, Severity
+        ├── patterns.py     # 30+ regex patterns + entropy helpers
+        ├── report.py       # Rich terminal output
+        └── scanner/
+            ├── files.py        # Sensitive file type detection
+            ├── gitignore.py    # .gitignore coverage audit
+            ├── history.py      # Full commit history scan
+            ├── identity.py     # Author identity validation
+            ├── remote.py       # Remote/branch safety
+            └── secrets.py      # Diff + content secret scanning
 ```
 
 ---
 
 ## Engineering Expectations
 
-- **Language / runtime** — TBD
-- **Distribution** — installable via a package manager (npm, pip, brew, etc.) + single binary option
-- **No runtime dependencies on the target repo** — must work on any git repo regardless of language/ecosystem
-- **Usable as a git hook** — `pre-push` hook installation should be one command
+- **Language / runtime** — Python 3.9+
+- **Distribution** — installable via pip; single binary via PyInstaller/Nuitka planned
+- **No runtime dependencies on the target repo** — works on any git repo regardless of language/ecosystem
+- **Usable as a git hook** — `git-safe-hooks install` (Phase 3)
 - **Exit codes** — `0` clean, `1` issues found, `2` tool error (distinguishable for CI)
-- **Output** — human-readable by default; `--json` flag for machine-readable output
+- **Output** — human-readable by default; `--json` flag for machine-readable output; `--format sarif` planned
