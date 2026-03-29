@@ -32,11 +32,22 @@ pip install -e ".[dev]"
 | Command | Description |
 |---|---|
 | `git-safe-check` | Scan staged/tracked files. Exits 0 = clean, 1 = issues, 2 = error. |
+| `git-safe-commit` | Drop-in for `git commit` — scans staged changes and commit message before committing. |
 | `git-safe-push` | Drop-in for `git push` — runs checks before pushing. |
 | `git-safe-publish` | Interactive full check + confirm identity + push. |
 | `git-safe-search` | Deep-scan entire commit history. |
 
 ## Usage
+
+### Commit safely
+
+```bash
+# Drop-in for git commit — scans staged changes and the commit message
+git-safe-commit -m "feat: add login page"
+
+# Amend without re-checking (checks already passed)
+git-safe-commit --amend --no-edit --skip-checks
+```
 
 ### Check before committing
 

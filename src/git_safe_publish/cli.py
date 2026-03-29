@@ -233,6 +233,111 @@ def check(
 
 
 # ---------------------------------------------------------------------------
+# git-safe-commit
+# ---------------------------------------------------------------------------
+
+def _extract_commit_message(git_args: Tuple[str, ...]) -> Optional[str]:
+    """Extract the -m / --message value from raw git commit args, if present."""
+    args = list(git_args)
+    for flag in ("-m", "--message"):
+        if flag in args:
+            idx = args.index(flag)
+            if idx + 1 < len(args):
+                return args[idx + 1]
+        # Handle -m"value" or --message=value forms
+        prefix = flag + ("=" if flag.startswith("--") else "")
+        for arg in args:
+            if arg.startswith(prefix) and len(arg) > len(prefix):
+                return arg[len(prefix):]
+    return None
+
+
+@click.command(
+    "git-safe-commit",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("git_args", nargs=-1, type=click.UNPROCESSED)
+@click.option("--skip-checks", is_flag=True, default=False, help="Skip safety checks and commit directly.")
+@click.option("--test", "run_test", is_flag=True, default=False, help="Run the test suite and exit.")
+@click.version_option(__version__, prog_name="git-safe-commit")
+@click.pass_context
+def commit(
+    ctx: click.Context,
+    git_args: Tuple[str, ...],
+    skip_checks: bool,
+    run_test: bool,
+) -> None:
+    """Drop-in replacement for `git commit` with pre-commit safety checks.
+
+    Scans staged changes for secrets, sensitive file types, and identity
+    issues before committing. Also scans the commit message (-m) for secrets.
+
+    All arguments are passed directly to `git commit`.
+
+    Examples:
+        git-safe-commit -m "feat: add login page"
+        git-safe-commit --amend --no-edit
+        git-safe-commit -m "wip" --allow-empty
+    """
+    if run_test:
+        sys.exit(_run_tests())
+
+    repo = _get_repo()
+    config = _load(repo)
+
+    if not skip_checks:
+        print_header("git-safe-commit")
+
+        result = ScanResult()
+
+        # 1. Scan staged diff for secrets
+        diff = get_staged_diff(repo)
+        if diff:
+            result.merge(scan_diff(diff, config))
+
+        # 2. Scan staged file types
+        staged_files = get_staged_files(repo)
+        if staged_files:
+            result.merge(scan_staged_files(staged_files, config))
+
+        # 3. Scan the commit message for embedded secrets
+        message = _extract_commit_message(git_args)
+        if message:
+            from git_safe_publish.scanner.secrets import scan_commit_message
+            msg_result = scan_commit_message(message, commit_sha="<pending>", config=config)
+            if not msg_result.is_clean:
+                for f in msg_result.findings:
+                    f.description = f"[commit message] {f.description}"
+            result.merge(msg_result)
+
+        # 4. Identity check
+        if config.check_identity:
+            result.merge(scan_identity(repo, config))
+
+        # 5. .gitignore audit (P2 — inform but don't block commits)
+        if config.check_gitignore:
+            result.merge(scan_gitignore(repo, config))
+
+        print_findings(result)
+        print_summary(result, scope="pre-commit check")
+
+        if result.has_blockers and config.block_on_secrets:
+            console.print("[bold red]✖  Commit blocked — resolve critical issues first.[/bold red]\n")
+            sys.exit(1)
+
+        if not result.is_clean:
+            if not confirm("Issues found. Commit anyway?", default=False):
+                console.print("[yellow]Commit cancelled.[/yellow]")
+                sys.exit(1)
+
+    # Execute the actual git commit
+    cmd = ["git", "commit", *git_args]
+    console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
+    proc = subprocess.run(cmd, cwd=repo)
+    sys.exit(proc.returncode)
+
+
+# ---------------------------------------------------------------------------
 # git-safe-search
 # ---------------------------------------------------------------------------
 

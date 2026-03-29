@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 git-safe-publish = "git_safe_publish.cli:publish"
 git-safe-push    = "git_safe_publish.cli:push"
+git-safe-commit  = "git_safe_publish.cli:commit"
 git-safe-check   = "git_safe_publish.cli:check"
 git-safe-search  = "git_safe_publish.cli:search"
 
