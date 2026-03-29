@@ -104,8 +104,12 @@ def _scan_line(
     for pattern in patterns:
         for match in pattern.findall(content):
             matched_value = match.group(0)
-            # Grab the last capturing group if present (usually the secret value)
-            captured = match.group(len(match.groups())) if match.groups() else matched_value
+            # Grab the last capturing group if present (usually the secret value).
+            # Fall back to the full match if the group is None (optional group that didn't participate).
+            if match.groups():
+                captured = match.group(len(match.groups())) or matched_value
+            else:
+                captured = matched_value
             if is_placeholder(captured):
                 continue
             findings.append(Finding(

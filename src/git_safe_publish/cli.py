@@ -91,11 +91,7 @@ def _run_tests(verbose: bool = False) -> int:
     print_header("git-safe-publish — test suite")
     console.print(f"[dim]Running tests from: {tests_dir}[/dim]\n")
 
-    cmd = [sys.executable, "-m", "pytest", str(tests_dir)]
-    if verbose:
-        cmd.append("-v")
-    else:
-        cmd.append("-v")  # always verbose for human runs; CI can pipe to --json
+    cmd = [sys.executable, "-m", "pytest", str(tests_dir), "-v", "-s"]
 
     proc = subprocess.run(cmd)
     if proc.returncode == 0:
