@@ -1,6 +1,6 @@
 # git-safe-publish
 
-![git-safe-publish logo](git-safe-publish-logo.png)
+![git-safe-publish logo](git-safe-publish-screen.jpg)
 
 A CLI toolchain that analyzes git repositories, commit history, and staged content to detect and prevent the accidental publication of sensitive data. It acts as a safety layer between a developer's local work and any remote push.
 
