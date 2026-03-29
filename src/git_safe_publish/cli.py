@@ -343,10 +343,11 @@ def check(
 )
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED)
 @click.option("--skip-checks", is_flag=True, default=False)
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Print each check as it runs with a pass/fail indicator.")
 @click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-commit")
 @click.pass_context
-def commit(ctx, git_args, skip_checks, run_test) -> None:
+def commit(ctx, git_args, skip_checks, verbose, run_test) -> None:
     """Drop-in replacement for `git commit` with pre-commit safety checks.
 
     Scans staged changes, sensitive files, commit message, and identity.
@@ -362,13 +363,28 @@ def commit(ctx, git_args, skip_checks, run_test) -> None:
         print_header("git-safe-commit")
         result = ScanResult()
 
+        def _vstep(label: str, sub: ScanResult) -> ScanResult:
+            if verbose:
+                count = len(sub.findings)
+                tag = (
+                    "[green]✔  clean[/green]" if count == 0
+                    else f"[red]✖  {count} finding(s)[/red]" if any(f.severity.value in ("P0", "P1") for f in sub.findings)
+                    else f"[yellow]⚠  {count} finding(s)[/yellow]"
+                )
+                console.print(f"  [dim]→[/dim]  {label:<45}{tag}")
+            return sub
+
         diff = get_staged_diff(repo)
         if diff:
-            result.merge(scan_diff(diff, config))
+            result.merge(_vstep("Scanning staged diff for secrets…", scan_diff(diff, config)))
+        elif verbose:
+            console.print("  [dim]→[/dim]  [dim]Scanning staged diff for secrets…[/dim]" + " " * 3 + "[dim]—  nothing staged[/dim]")
 
         staged_files = get_staged_files(repo)
         if staged_files:
-            result.merge(scan_staged_files(staged_files, config))
+            result.merge(_vstep("Scanning staged file types…", scan_staged_files(staged_files, config)))
+        elif verbose:
+            console.print("  [dim]→[/dim]  [dim]Scanning staged file types…[/dim]" + " " * 13 + "[dim]—  nothing staged[/dim]")
 
         message = _extract_commit_message(git_args)
         if message:
@@ -376,13 +392,18 @@ def commit(ctx, git_args, skip_checks, run_test) -> None:
             msg_result = scan_commit_message(message, "<pending>", config)
             for f in msg_result.findings:
                 f.description = f"[commit message] {f.description}"
-            result.merge(msg_result)
+            result.merge(_vstep("Scanning commit message…", msg_result))
+        elif verbose:
+            console.print("  [dim]→[/dim]  [dim]Scanning commit message…[/dim]" + " " * 19 + "[dim]—  no -m flag[/dim]")
 
         if config.check_identity:
-            result.merge(scan_identity(repo, config))
+            result.merge(_vstep("Checking committer identity…", scan_identity(repo, config)))
 
         if config.check_gitignore:
-            result.merge(scan_gitignore(repo, config))
+            result.merge(_vstep("Auditing .gitignore coverage…", scan_gitignore(repo, config)))
+
+        if verbose:
+            console.print()
 
         result = _apply_allowlist(result, repo)
         print_findings(result)
@@ -418,11 +439,12 @@ def commit(ctx, git_args, skip_checks, run_test) -> None:
 @click.option("--remediate", is_flag=True, default=False)
 @click.option("--exposure", is_flag=True, default=False, help="Show exposure window (first/last seen date per finding).")
 @click.option("--metadata", is_flag=True, default=False, help="Also scan branch names, tags, stash, submodules, hooks.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show each commit SHA and finding count as it is scanned.")
 @click.option("--quiet", is_flag=True, default=False)
 @click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-search")
 def search(branch, limit, since, author, output_fmt, output_json, output_file,
-           remediate, exposure, metadata, quiet, run_test) -> None:
+           remediate, exposure, metadata, verbose, quiet, run_test) -> None:
     """Deep-scan full commit history for secrets and sensitive data.
 
     Exits 0 if clean, 1 if issues found, 2 on error.
@@ -451,7 +473,11 @@ def search(branch, limit, since, author, output_fmt, output_json, output_file,
         console.print(f"[dim]Scanning history ({', '.join(scope_parts)})…[/dim]\n")
 
     def _progress(current, total, sha):
-        if not quiet and fmt == "table":
+        if quiet:
+            return
+        if verbose and fmt == "table":
+            console.print(f"  [dim]→[/dim]  [{current}/{total}] {sha[:12]}…", end="")
+        elif fmt == "table":
             print_progress(current, total, sha)
 
     # Filter commits by --since and --author
@@ -479,12 +505,27 @@ def search(branch, limit, since, author, output_fmt, output_json, output_file,
             scan_branch_names, scan_tag_annotations, scan_stash,
             scan_submodules, scan_git_hooks, scan_github_actions,
         )
-        result.merge(scan_branch_names(repo, config))
-        result.merge(scan_tag_annotations(repo, config))
-        result.merge(scan_stash(repo, config))
-        result.merge(scan_submodules(repo, config))
-        result.merge(scan_git_hooks(repo, config))
-        result.merge(scan_github_actions(repo, config))
+
+        def _mstep(label: str, fn, *args) -> ScanResult:
+            if verbose and fmt == "table":
+                console.print(f"  [dim]→[/dim]  {label:<45}", end="")
+            sub = fn(*args)
+            if verbose and fmt == "table":
+                count = len(sub.findings)
+                tag = (
+                    "[green]✔  clean[/green]" if count == 0
+                    else f"[red]✖  {count} finding(s)[/red]" if any(f.severity.value in ("P0", "P1") for f in sub.findings)
+                    else f"[yellow]⚠  {count} finding(s)[/yellow]"
+                )
+                console.print(tag)
+            return sub
+
+        result.merge(_mstep("Scanning branch names…", scan_branch_names, repo, config))
+        result.merge(_mstep("Scanning tag annotations…", scan_tag_annotations, repo, config))
+        result.merge(_mstep("Scanning stash…", scan_stash, repo, config))
+        result.merge(_mstep("Scanning submodule URLs…", scan_submodules, repo, config))
+        result.merge(_mstep("Checking .git/hooks integrity…", scan_git_hooks, repo, config))
+        result.merge(_mstep("Scanning GitHub Actions workflows…", scan_github_actions, repo, config))
 
     result = _apply_allowlist(result, repo)
 
@@ -516,11 +557,12 @@ def search(branch, limit, since, author, output_fmt, output_json, output_file,
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED)
 @click.option("--format", "output_fmt", type=_FORMAT_CHOICES, default="table", show_default=True)
 @click.option("--json", "output_json", is_flag=True, default=False, hidden=True)
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Print each check as it runs with a pass/fail indicator.")
 @click.option("--skip-checks", is_flag=True, default=False)
 @click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-push")
 @click.pass_context
-def push(ctx, git_args, output_fmt, output_json, skip_checks, run_test) -> None:
+def push(ctx, git_args, output_fmt, output_json, verbose, skip_checks, run_test) -> None:
     """Drop-in replacement for `git push` with pre-push safety checks."""
     if run_test:
         sys.exit(_run_tests())
@@ -547,6 +589,7 @@ def push(ctx, git_args, output_fmt, output_json, skip_checks, run_test) -> None:
             target_remote=target_remote,
             target_branch=target_branch,
             force=force,
+            verbose=verbose,
         )
 
         output_result(result, fmt=fmt, scope="pre-push check")
@@ -846,9 +889,10 @@ def hooks_ci(platform, output_file) -> None:
 @click.option("--branch", default="--all", show_default=True)
 @click.option("--limit", default=None, type=int)
 @click.option("--output", "output_file", default=None, help="Write remediation script to FILE.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show each commit as it is scanned.")
 @click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-fix")
-def fix(history, branch, limit, output_file, run_test) -> None:
+def fix(history, branch, limit, output_file, verbose, run_test) -> None:
     """Generate guided remediation commands for history findings.
 
     Scans staged changes (or full history with --history), then produces
@@ -869,7 +913,10 @@ def fix(history, branch, limit, output_file, run_test) -> None:
         console.print("[dim]Scanning full history…[/dim]\n")
 
         def _prog(cur, tot, sha):
-            print_progress(cur, tot, sha)
+            if verbose:
+                console.print(f"  [dim]→[/dim]  [{cur}/{tot}] {sha[:12]}…")
+            else:
+                print_progress(cur, tot, sha)
 
         result = scan_history(repo, config, branch=branch, limit=limit,
                               progress_callback=_prog, track_dates=True)
@@ -952,10 +999,11 @@ def fix(history, branch, limit, output_file, run_test) -> None:
 @click.option("--severity", "severity_threshold", default="P2", show_default=True,
               type=click.Choice(["P0", "P1", "P2", "P3"]))
 @click.option("--ignore", "ignore_globs", multiple=True, metavar="GLOB", help="Glob patterns to skip.")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show each file as it is scanned with a pass/fail indicator.")
 @click.option("--remediate", is_flag=True, default=False)
 @click.option("--test", "run_test", is_flag=True, default=False)
 @click.version_option(__version__, prog_name="git-safe-scan")
-def scan(paths, output_fmt, output_json, output_file, severity_threshold, ignore_globs, remediate, run_test) -> None:
+def scan(paths, output_fmt, output_json, output_file, severity_threshold, ignore_globs, verbose, remediate, run_test) -> None:
     """Scan arbitrary files or directories for secrets — no git repo required.
 
     Examples:
@@ -1008,7 +1056,17 @@ def scan(paths, output_fmt, output_json, output_file, severity_threshold, ignore
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        result.merge(scan_file_content(content, rel, config))
+        file_result = scan_file_content(content, rel, config)
+        if verbose and fmt == "table":
+            count = len(file_result.findings)
+            label = str(file_path)[-50:].ljust(52)
+            tag = (
+                "[green]✔  clean[/green]" if count == 0
+                else f"[red]✖  {count} finding(s)[/red]" if any(f.severity.value in ("P0", "P1") for f in file_result.findings)
+                else f"[yellow]⚠  {count} finding(s)[/yellow]"
+            )
+            console.print(f"  [dim]→[/dim]  {label}{tag}")
+        result.merge(file_result)
         scanned += 1
 
     if fmt == "table":
