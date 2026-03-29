@@ -268,3 +268,11 @@ A global config at `~/.git-safe-publish.yml` applies to all repositories.
 | P1 | HIGH | OpenAI key, database URL with credentials, GitHub PAT, pull_request_target misconfiguration |
 | P2 | MEDIUM | Generic hardcoded password, JWT, absolute path disclosure, unpinned GitHub Action |
 | P3 | LOW | Commented-out credentials, TODO referencing secrets, unmanaged hook |
+
+---
+
+## Support
+
+If you find this tool useful, consider buying me a coffee ☕
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/jason_unix)
